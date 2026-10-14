@@ -2,7 +2,7 @@
 set -euo pipefail
 APP="$(basename "$PWD")"
 APP_NAME="SONDE RS41"
-APP_VER="0.3"
+APP_VER="0.5"
 APP_API_MIN=2
 APP_VMA=${APP_VMA:-0x20000280}
 OUT="${APP_NAME// /}"

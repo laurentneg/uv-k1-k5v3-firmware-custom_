@@ -1,6 +1,6 @@
 /* Copyright 2026 — Apache-2.0
- * SONDE M20: decode Meteomodem M20 on the radio (PA4 @ 9.6 kHz chips, BK4829).
- * GPS first, then alt / T / P when available. Key * opens speaker/view params.
+ * SONDE M20: decode Meteomodem M20 on the radio (PA4 @ 19.2 kHz, BK4829).
+ * GPS first, then alt / T / P when available. Key * opens speaker/ATT params.
  */
 #include <stdint.h>
 #include <stdbool.h>
@@ -48,18 +48,23 @@ void *memcpy(void *d, const void *s, size_t n)
 #define REG_73 0x73
 #define REG_30 0x30
 #define REG_43 0x43
-/* RF filter 4.5k x2 (strong + weak), 25k mode, +6 dB after FM demod */
+/* Widest IF filter for the session (restored on exit). */
 #define REG_43_M20 0x7E2Cu
 #define REG_47 0x47
+/* AF select = 9 (bypass). Stock FM AF low-passes ~3–4 kHz and kills 1-chip runs. */
 #define REG_47_M20 0x6942u
 #define REG_38 0x38
 #define REG_39 0x39
 #define STEP_10HZ 500
 #define OFF_MAX 10
-#define HOUSE_EVERY 4800u /* ~250 ms — less blit = fewer dropped AF samples */
+/* UI / keypad about every 250 ms so AF sampling keeps its 52 µs budget. */
+#define HOUSE_EVERY 4800u
 #define CFG_MAGIC 0x21u
+#define MENU_ROWS 2u
 #define MENU_VAL1 64u
 #define MENU_VAL2 98u
+/* Just after the title capsule (2 + title width + 2 px gap). */
+#define WAIT_CAPS_X (2u + T_TITLE_CHARS * 4u + 2u)
 #define SPK_X 59u
 #define BK_REG_13 0x13
 #define ATT_SETTLE 40
@@ -71,7 +76,7 @@ static struct {
     const app_api_t *A;
     sonde_info_t info;
     uint32_t vfoFreq;
-    uint8_t prevKey, menu, line;
+    uint8_t prevKey, menu, mrow, line;
     app_cfg_t cfg;
     int8_t offSteps;
     bool running;
@@ -134,9 +139,8 @@ static void applyAtt(void)
     g.A->bk_write(BK_REG_13, (uint16_t)((reg & ~0x03FFu) | gain));
     g.A->set_agc(false);
 }
-static char *putAtt(char *o, const char *s)
+static char *putAttVal(char *o, const char *s)
 {
-    o = put(o, s + T_ATT);
     if (g.cfg.att < ATT_BYP0) {
         uint8_t db;
         g.A->asset_read((uint16_t)(ATT_DB + g.cfg.att), &db, 1);
@@ -145,6 +149,8 @@ static char *putAtt(char *o, const char *s)
     } else o = put(o, g.cfg.att == ATT_BYP0 ? s + T_BYP : s + T_BYP_PLUS);
     return o;
 }
+static char *putAtt(char *o, const char *s)
+{ return putAttVal(put(o, s + T_ATT), s); }
 static void biasOn(const saved_hw_t *s)
 {
     GPIOA_MODER = s->moder | (3u << 8);
@@ -166,7 +172,7 @@ static uint16_t adcRead(void)
     return (uint16_t)(ADC_DR & 0x0FFFu);
 }
 
-/* Main thermistor: range bits 12..13 pick the divider, then ADC(T) table. */
+/* Main NTC (auto_rx get_Temp): range in bits 12..13, °C from TEMP_TAB asset. */
 static void m20Temp(sonde_info_t *in)
 {
     uint16_t tab[T_N], a = in->tRaw;
@@ -190,18 +196,30 @@ static void emit(char *buf, char *end)
     g.A->print_normal(buf, 0, 0, g.line++);
 }
 
-static void opt(const char *s, uint8_t x, bool on)
+static void opt(const char *s, uint8_t x, uint8_t line, bool on)
 {
-    if (on) g.A->print_bold(s, x, 0, 2);
-    else g.A->print_normal(s, x, 0, 2);
+    if (on) g.A->print_bold(s, x, 0, line);
+    else g.A->print_normal(s, x, 0, line);
+}
+
+static void attCycle(void)
+{
+    if (++g.cfg.att >= ATT_COUNT) g.cfg.att = 0;
+    applyAtt();
+    g.A->delay_ms(ATT_SETTLE);
 }
 
 static void drawMenu(const char *s)
 {
+    char str[20]; char *o;
     g.A->print_inverse(s + T_PARAMS, 2, 0, true, true, (uint8_t)(2u + 6u * 4u));
-    g.A->print_normal(s + T_SPK, 0, 0, 2);
-    opt(s + T_ON, MENU_VAL1, g.cfg.spk);
-    opt(s + T_OFF, MENU_VAL2, !g.cfg.spk);
+    g.A->print_normal(">", 0, 0, (uint8_t)(2u + g.mrow));
+    g.A->print_normal(s + T_SPK, 8, 0, 2);
+    opt(s + T_ON, MENU_VAL1, 2, g.cfg.spk);
+    opt(s + T_OFF, MENU_VAL2, 2, !g.cfg.spk);
+    g.A->print_normal(s + T_ATT, 8, 0, 3);
+    o = putAttVal(str, s); *o = '\0';
+    g.A->print_bold(str, MENU_VAL1, 0, 3);
     g.A->print_tiny(s + T_HINT, 0, 49, false, true);
 }
 
@@ -215,12 +233,13 @@ static void draw(void)
     g.A->draw_battery();
     if (g.menu) { drawMenu(s); return; }
     g.A->print_inverse(s + T_TITLE, 2, 0, true, true, (uint8_t)(2u + T_TITLE_CHARS * 4u));
+    if (!g.nOk)
+        g.A->print_inverse(s + T_WAIT, WAIT_CAPS_X, 0, true, true,
+                           (uint8_t)(WAIT_CAPS_X + T_WAIT_CHARS * 4u));
     if (g.cfg.spk) g.A->asset_read(BMP_SPK, g.A->status_line + SPK_X, SPK_W);
     g.line = 1;
 
-    if (!g.nOk) {
-        if (g.A->ticks_ms() & 512u) emit(str, put(str, s + T_WAIT));
-    } else {
+    if (g.nOk) {
         if (in->flags & SONDE_HAS_POS) {
             char *latEnd = putPos(str, in->latS, 'N', 'S');
             o = latEnd; *o++ = ' ';
@@ -262,18 +281,23 @@ static void handleKey(uint8_t key)
     if (key == APP_KEY_INVALID || key == g.prevKey) { g.prevKey = key; return; }
     g.prevKey = key;
     if (g.menu) {
-        if (key == APP_KEY_STAR) { g.cfg.spk ^= 1u; g.A->audio_path(g.cfg.spk); }
-        else if (key == APP_KEY_EXIT || key == APP_KEY_MENU) g.menu = 0;
+        int8_t d = g.A->nav_dir(key);
+        if (d) {
+            int8_t r = (int8_t)(g.mrow + d);
+            if (r < 0) r = (int8_t)(MENU_ROWS - 1u);
+            if (r >= (int8_t)MENU_ROWS) r = 0;
+            g.mrow = (uint8_t)r;
+        } else if (key == APP_KEY_STAR) {
+            if (g.mrow == 0) { g.cfg.spk ^= 1u; g.A->audio_path(g.cfg.spk); }
+            else attCycle();
+        } else if (key == APP_KEY_EXIT || key == APP_KEY_MENU) g.menu = 0;
         return;
     }
     switch (key) {
         case APP_KEY_EXIT: g.running = false; break;
-        case APP_KEY_STAR: g.menu = 1; break;
-        case APP_KEY_3:
-            if (++g.cfg.att >= ATT_COUNT) g.cfg.att = 0;
-            applyAtt();
-            g.A->delay_ms(ATT_SETTLE);
-            break;
+        case APP_KEY_1: g.cfg.spk ^= 1u; g.A->audio_path(g.cfg.spk); break;
+        case APP_KEY_STAR: g.mrow = 0; g.menu = 1; break;
+        case APP_KEY_3: attCycle(); break;
         case APP_KEY_5: g.offSteps = 0; tune(); break;
         case APP_KEY_4: case APP_KEY_6: {
             int8_t n = (int8_t)(g.offSteps + (key == APP_KEY_4 ? -1 : 1));
@@ -312,7 +336,7 @@ static void listen(const saved_hw_t *saved)
             }
             decm20_rearm(&m20);
         }
-        /* No UI / get_key in ST_DATA: keypad scan blows the 52 µs/sample budget. */
+        /* No UI in ST_DATA: get_key alone exceeds one sample period. */
         if (decm20_busy(&m20)) continue;
         if (!wantUi && ++cnt < HOUSE_EVERY) continue;
         cnt = 0;
@@ -355,7 +379,6 @@ void app_main(const app_api_t *api)
     applyAtt();
     api->audio_path(g.cfg.spk);
     api->set_af(APP_AF_FM);
-    /* AF=9 (bypass): FM AF output is low-passed ~3-4 kHz, kills 1-chip runs. */
     api->bk_write(REG_47, REG_47_M20);
     api->delay_ms(50);
     g.running = true;

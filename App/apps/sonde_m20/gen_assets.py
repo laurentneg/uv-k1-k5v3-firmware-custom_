@@ -8,7 +8,7 @@ from app_assets import Assets
 TITLE = "SONDE M20"
 UI = [
     ("T_TITLE",  TITLE),
-    ("T_WAIT",   "WAITING..."),
+    ("T_WAIT",   "WAIT"),
     ("T_NOPOS",  "no position"),
     ("T_ALT",    "ALT "),
     ("T_M",      "m"),
@@ -26,7 +26,7 @@ UI = [
     ("T_BYP_PLUS","BYP+"),
     ("T_ON",     "ON"),
     ("T_OFF",    "OFF"),
-    ("T_HINT",   "*=change EXIT=back"),
+    ("T_HINT",   "UP/DN *=change EXIT=back"),
 ]
 a = Assets("SONDE_M20")
 ui_size = 0
@@ -36,6 +36,7 @@ for name, s in UI:
     ui_size += len(s) + 1 + pad
 a.const("UI_SIZE", ui_size)
 a.const("T_TITLE_CHARS", len(TITLE))
+a.const("T_WAIT_CHARS", 4)
 SPK = [0x1c, 0x1c, 0x3e, 0x7f, 0x00, 0x22, 0x1c, 0x41, 0x22, 0x1c]
 a.u8("BMP_SPK", SPK)
 a.const("SPK_W", len(SPK))

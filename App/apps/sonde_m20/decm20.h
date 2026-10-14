@@ -5,8 +5,8 @@
 #include "sonde_info.h"
 
 #define M20_FRAME_LEN 70u
-#define M20_BAUD      9600u /* Manchester chip rate (auto_rx m20mod) */
-#define M20_CHIP_N    64u   /* ring: rawheader + first softin word */
+#define M20_BAUD      9600u /* Manchester chip rate (auto_rx m20mod softin) */
+#define M20_CHIP_N    64u   /* ring holds rawheader (32) + first softin word (32) */
 
 typedef struct {
     int32_t  meanQ8, ph, integ, h1, pe;

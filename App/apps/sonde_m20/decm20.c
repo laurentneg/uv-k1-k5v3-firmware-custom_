@@ -1,6 +1,14 @@
-/* M20 — auto_rx m20mod softin:
- *  rawheader (32 chips) then body softin→0x4520; try both polarities for body.
- * FSK: 19.2 kHz, 2 samp/chip, edge DPLL. */
+/* M20 soft-decision decoder (auto_rx m20mod softin).
+ *
+ * Chip rate 9600 Manchester; ADC at 19.2 kHz → nominally 2 samples/chip.
+ * Search: correlate 32-chip rawheader, then softin the next 32 chips to
+ * 0x4520/0x4320. Body polarity: an inverted AF chain only flips the first
+ * softin bit (prev starts at 0), so inv = MSB of that word.
+ *
+ * Timing: chip boundaries often fall mid-sample. decm20_push splits the
+ * sample at ph (Q8) and pulls ph from interpolated zero crossings.
+ * DC mean is frozen in ST_DATA so PA4 bias creep does not spoil late CRC bits.
+ */
 #include "decm20.h"
 
 #define FS       19200u
@@ -157,12 +165,9 @@ bool decm20_push(decm20_t *d, uint16_t sample)
     xq = (int32_t)sample << 8;
     if (d->meanQ8 < 0) d->meanQ8 = xq;
     e = xq - d->meanQ8;
-    /* Freeze DC in DATA (PA4 bias creep breaks late CRC bits). */
     if (d->state != ST_DATA)
         d->meanQ8 += (e + (1 << (MEAN_SH - 1))) >> MEAN_SH;
-    /* ph = next chip boundary, Q8 samples from this sample's start.
-     * Boundaries fall mid-sample (2 samp/chip): split the sample, and
-     * time edges by interpolating the zero crossing. */
+    /* ph: Q8 offset to the next chip boundary from this sample's start. */
     s = e > 0 ? 1u : 0u;
     if (s != d->sign) {
         uint32_t a = (uint32_t)(d->pe < 0 ? -d->pe : d->pe);
